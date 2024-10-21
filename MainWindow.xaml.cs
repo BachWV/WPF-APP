@@ -1,15 +1,16 @@
 ﻿using System;
 using System.Diagnostics;
-using System.Net;
-using System.Net.Sockets;
 using System.Net.NetworkInformation;
 using System.Text;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Timers;
+using System.Net.Http;
+using System.Text.Json;
+using System.Configuration;
 using Timer = System.Timers.Timer;
 
-namespace FirewallControlApp
+namespace WpfApp1
 {
     public partial class MainWindow : Window
     {
@@ -18,10 +19,11 @@ namespace FirewallControlApp
 # 设置防火墙默认出站策略为“阻止”
 Set-NetFirewallProfile -Profile Domain,Public,Private -DefaultOutboundAction Block
 
-$ip = '121.48.165.91' 
-
+$ip1 = '121.48.165.91' 
+$ip2 = '120.24.176.162' 
 # 创建允许访问matu的出站规则
-New-NetFirewallRule -DisplayName 'Allow matu $ip' -Direction Outbound -Action Allow -RemoteAddress $ip -Protocol Any
+New-NetFirewallRule -DisplayName 'Allow matu $ip1' -Direction Outbound -Action Allow -RemoteAddress $ip1 -Protocol Any
+New-NetFirewallRule -DisplayName 'Allow matu $ip2' -Direction Outbound -Action Allow -RemoteAddress $ip2 -Protocol Any
 ";
 
         private readonly string scriptDisableFirewall = @"
@@ -33,15 +35,68 @@ Get-NetFirewallRule -DisplayName 'Allow matu*' | Remove-NetFirewallRule
 ";
 
         private Timer monitorTimer;
-        private readonly string[] hostsToCheck = { "baidu.com", "aliyun.com" };
-        private readonly string serverIp = "120.24.176.24";
-        private readonly int serverPort = 8080; // 请替换为实际端口号
+        private readonly string[] hostsToCheck;
+        private readonly string serverIp;
+        private readonly int serverPort;
+        private readonly string apiLogEndpoint;
+        private readonly string apiKey;
+        private readonly double monitorIntervalSeconds;
 
-        private readonly string logFilePath = System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "log.txt");
+        private string userName;
+        private string studentID;
+
+        private static readonly HttpClient httpClient = new HttpClient();
 
         public MainWindow()
         {
             InitializeComponent();
+
+            // 读取配置
+            serverIp = ConfigurationManager.AppSettings["ServerIp"] ?? "120.24.176.162";
+            serverPort = int.TryParse(ConfigurationManager.AppSettings["ServerPort"], out int port) ? port : 1234;
+            apiLogEndpoint = ConfigurationManager.AppSettings["ApiLogEndpoint"] ?? $"http://{serverIp}:{serverPort}/api/logs";
+            apiKey = ConfigurationManager.AppSettings["ApiKey"] ?? "your_secure_api_key"; // 替换为您的 API 密钥
+            hostsToCheck = (ConfigurationManager.AppSettings["HostsToCheck"] ?? "baidu.com,aliyun.com").Split(',');
+            monitorIntervalSeconds = double.TryParse(ConfigurationManager.AppSettings["MonitorIntervalSeconds"], out double interval) ? interval : 30;
+        }
+
+        // 窗口加载时触发
+        private void Window_Loaded(object sender, RoutedEventArgs e)
+        {
+            // 显示输入弹窗
+            InputOverlay.Visibility = Visibility.Visible;
+        }
+
+        private async void OkButton_Click(object sender, RoutedEventArgs e)
+        {
+            if (string.IsNullOrWhiteSpace(NameTextBox.Text) || string.IsNullOrWhiteSpace(StudentIDTextBox.Text))
+            {
+                MessageBox.Show("请输入姓名和学号。", "输入错误", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+
+            userName = NameTextBox.Text.Trim();
+            studentID = StudentIDTextBox.Text.Trim();
+
+            // 记录用户登录日志
+            bool logSuccess = await LogAsync("INFO", $"用户登录: 姓名={userName}, 学号={studentID}");
+
+            if (logSuccess)
+            {
+                // 隐藏输入弹窗并显示主内容
+                InputOverlay.Visibility = Visibility.Collapsed;
+                MainContent.Visibility = Visibility.Visible;
+            }
+            else
+            {
+                MessageBox.Show("登录日志上传失败。", "错误", MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+        }
+
+        private void CancelButton_Click(object sender, RoutedEventArgs e)
+        {
+            // 用户取消，退出应用程序
+            Application.Current.Shutdown();
         }
 
         private async void ToggleFirewallButton_Checked(object sender, RoutedEventArgs e)
@@ -126,28 +181,24 @@ Get-NetFirewallRule -DisplayName 'Allow matu*' | Remove-NetFirewallRule
                         try
                         {
                             System.IO.File.Delete(tempScriptPath);
-                            Log("脚本删除成功。");
                         }
                         catch { }
 
                         if (process.ExitCode == 0 && string.IsNullOrWhiteSpace(error))
                         {
-                            Log("脚本执行成功。");
-                            Log($"输出: {output}");
+                            LogAsync("INFO", "脚本执行成功。输出: " + output).Wait();
                             return (true, output, error);
                         }
                         else
                         {
-                            Log($"脚本执行失败，ExitCode: {process.ExitCode}");
-                            Log($"错误: {error}");
-                            Log($"输出: {output}");
+                            LogAsync("ERROR", $"脚本执行失败，ExitCode: {process.ExitCode}。错误: {error}。输出: {output}").Wait();
                             return (false, output, error);
                         }
                     }
                 }
                 catch (Exception ex)
                 {
-                    Log($"运行脚本时发生异常: {ex.ToString()}");
+                    LogAsync("EXCEPTION", $"运行脚本时发生异常: {ex.ToString()}").Wait();
                     Dispatcher.Invoke(() =>
                     {
                         MessageBox.Show($"运行脚本时发生异常:\n{ex.ToString()}", "异常", MessageBoxButton.OK, MessageBoxImage.Error);
@@ -159,12 +210,12 @@ Get-NetFirewallRule -DisplayName 'Allow matu*' | Remove-NetFirewallRule
 
         private void StartMonitoring()
         {
-            monitorTimer = new Timer(30000); // 30秒
+            monitorTimer = new Timer(monitorIntervalSeconds * 1000); // 以秒为单位
             monitorTimer.Elapsed += MonitorTimer_Elapsed;
             monitorTimer.AutoReset = true;
             monitorTimer.Enabled = true;
 
-            Log($"已启动网络监控，每 30 秒一次。");
+            LogAsync("INFO", $"已启动网络监控，每 {monitorIntervalSeconds} 秒一次。").Wait();
         }
 
         private void StopMonitoring()
@@ -175,7 +226,7 @@ Get-NetFirewallRule -DisplayName 'Allow matu*' | Remove-NetFirewallRule
                 monitorTimer.Dispose();
                 monitorTimer = null;
 
-                Log("已停止网络监控。");
+                LogAsync("INFO", "已停止网络监控。").Wait();
             }
         }
 
@@ -184,16 +235,16 @@ Get-NetFirewallRule -DisplayName 'Allow matu*' | Remove-NetFirewallRule
             monitorTimer.Stop(); // 避免重入
 
             string message = await CheckConnectivityAsync();
-            Log($"检测到网络连通性:\n{message}");
+            await LogAsync("INFO", $"检测到网络连通性:\n{message}");
 
-            bool sendResult = await SendResultToServerAsync(serverIp, serverPort, message);
+            bool sendResult = await SendResultToServerAsync(message);
             if (sendResult)
             {
-                Log("检测结果已成功发送到服务器。");
+                await LogAsync("INFO", "检测结果已成功发送到服务器。");
             }
             else
             {
-                Log("发送检测结果到服务器失败。");
+                await LogAsync("ERROR", "发送检测结果到服务器失败。");
             }
 
             monitorTimer.Start(); // 重新启动计时器
@@ -231,31 +282,46 @@ Get-NetFirewallRule -DisplayName 'Allow matu*' | Remove-NetFirewallRule
             }
         }
 
-        private Task<bool> SendResultToServerAsync(string serverIp, int port, string message)
+        private async Task<bool> SendResultToServerAsync(string message)
         {
-            return Task.Run(() =>
+            try
             {
-                try
+                var logEntry = new LogEntry
                 {
-                    using (TcpClient client = new TcpClient())
-                    {
-                        var task = client.ConnectAsync(serverIp, port);
-                        bool connected = task.Wait(2000); // 2秒超时
-                        if (!connected)
-                            return false;
+                    Timestamp = DateTime.Now,
+                    Message = message,
+                    Level = "INFO",
+                    UserName = userName,
+                    StudentID = studentID
+                };
 
-                        NetworkStream stream = client.GetStream();
-                        byte[] data = Encoding.UTF8.GetBytes(message);
-                        stream.Write(data, 0, data.Length);
-                        stream.Flush();
-                    }
+                string jsonString = JsonSerializer.Serialize(logEntry);
+                var content = new StringContent(jsonString, Encoding.UTF8, "application/json");
+
+                // 添加 API 密钥到请求头
+                if (httpClient.DefaultRequestHeaders.Contains("X-API-KEY"))
+                {
+                    httpClient.DefaultRequestHeaders.Remove("X-API-KEY");
+                }
+                httpClient.DefaultRequestHeaders.Add("X-API-KEY", apiKey);
+
+                HttpResponseMessage response = await httpClient.PostAsync(apiLogEndpoint, content);
+                if (response.IsSuccessStatusCode)
+                {
                     return true;
                 }
-                catch
+                else
                 {
+                    string responseContent = await response.Content.ReadAsStringAsync();
+                    await LogAsync("ERROR", $"服务器返回错误状态码: {response.StatusCode}。响应内容: {responseContent}");
                     return false;
                 }
-            });
+            }
+            catch (Exception ex)
+            {
+                await LogAsync("EXCEPTION", $"发送日志到服务器时发生异常: {ex.ToString()}");
+                return false;
+            }
         }
 
         protected override void OnClosed(EventArgs e)
@@ -265,20 +331,66 @@ Get-NetFirewallRule -DisplayName 'Allow matu*' | Remove-NetFirewallRule
         }
 
         /// <summary>
-        /// 记录日志到 log.txt 文件。
+        /// 记录日志到 API 接口。
         /// </summary>
+        /// <param name="level">日志级别，例如 "INFO", "ERROR", "EXCEPTION"</param>
         /// <param name="message">日志消息。</param>
-        private void Log(string message)
+        /// <returns></returns>
+        private async Task<bool> LogAsync(string level, string message)
         {
             try
             {
-                string logEntry = $"{DateTime.Now}: {message}";
-                System.IO.File.AppendAllText(logFilePath, logEntry + Environment.NewLine);
+                var logEntry = new LogEntry
+                {
+                    Timestamp = DateTime.Now,
+                    Message = message,
+                    Level = level,
+                    UserName = userName,
+                    StudentID = studentID
+                };
+
+                string jsonString = JsonSerializer.Serialize(logEntry);
+                var content = new StringContent(jsonString, Encoding.UTF8, "application/json");
+
+                // 添加 API 密钥到请求头
+                if (httpClient.DefaultRequestHeaders.Contains("X-API-KEY"))
+                {
+                    httpClient.DefaultRequestHeaders.Remove("X-API-KEY");
+                }
+                httpClient.DefaultRequestHeaders.Add("X-API-KEY", apiKey);
+
+                HttpResponseMessage response = await httpClient.PostAsync(apiLogEndpoint, content);
+                if (!response.IsSuccessStatusCode)
+                {
+                    // 如果日志上传失败，记录到本地文件作为备份
+                    string logFilePath = System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "log_backup.txt");
+                    string logToBackup = $"{logEntry.Timestamp}: [{logEntry.Level}] {logEntry.Message}";
+                    System.IO.File.AppendAllText(logFilePath, logToBackup + Environment.NewLine);
+                    return false;
+                }
+
+                return true;
             }
-            catch
+            catch (Exception ex)
             {
-                // 忽略日志写入失败的情况
+                // 如果在记录日志时发生异常，记录到本地文件作为备份
+                string logFilePath = System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "log_backup.txt");
+                string logToBackup = $"{DateTime.Now}: [EXCEPTION] 记录日志时发生异常: {ex.ToString()}";
+                System.IO.File.AppendAllText(logFilePath, logToBackup + Environment.NewLine);
+                return false;
             }
         }
+    }
+
+    /// <summary>
+    /// 日志条目模型
+    /// </summary>
+    public class LogEntry
+    {
+        public DateTime Timestamp { get; set; }
+        public string Message { get; set; }
+        public string Level { get; set; } // 如 "INFO", "ERROR", "EXCEPTION"
+        public string UserName { get; set; }
+        public string StudentID { get; set; }
     }
 }
