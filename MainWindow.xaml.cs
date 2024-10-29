@@ -20,7 +20,7 @@ namespace WpfApp1
 Set-NetFirewallProfile -Profile Domain,Public,Private -DefaultOutboundAction Block
 
 $ip1 = '121.48.165.91' 
-$ip2 = '120.24.176.162' 
+$ip2 = 'your_server_ip' 
 # 创建允许访问matu的出站规则
 New-NetFirewallRule -DisplayName 'Allow matu $ip1' -Direction Outbound -Action Allow -RemoteAddress $ip1 -Protocol Any
 New-NetFirewallRule -DisplayName 'Allow matu $ip2' -Direction Outbound -Action Allow -RemoteAddress $ip2 -Protocol Any
@@ -52,9 +52,9 @@ Get-NetFirewallRule -DisplayName 'Allow matu*' | Remove-NetFirewallRule
             InitializeComponent();
 
             // 读取配置
-            serverIp = ConfigurationManager.AppSettings["ServerIp"] ?? "120.24.176.162";
+            serverIp = ConfigurationManager.AppSettings["ServerIp"];
             serverPort = int.TryParse(ConfigurationManager.AppSettings["ServerPort"], out int port) ? port : 1234;
-            apiLogEndpoint = ConfigurationManager.AppSettings["ApiLogEndpoint"] ?? $"http://{serverIp}:{serverPort}/api/logs";
+            apiLogEndpoint = ConfigurationManager.AppSettings["ApiLogEndpoint"] ?? $"http://{serverIp}:{serverPort}/api/logs";  
             apiKey = ConfigurationManager.AppSettings["ApiKey"] ?? "your_secure_api_key"; // 替换为您的 API 密钥
             hostsToCheck = (ConfigurationManager.AppSettings["HostsToCheck"] ?? "baidu.com,aliyun.com").Split(',');
             monitorIntervalSeconds = double.TryParse(ConfigurationManager.AppSettings["MonitorIntervalSeconds"], out double interval) ? interval : 30;
